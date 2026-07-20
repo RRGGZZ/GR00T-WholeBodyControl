@@ -16,6 +16,7 @@ import yaml
 from gear_sonic.utils.network.network_utils import resolve_interface
 
 WBC_VERSIONS = ["sonic_model12"]
+ROBOT_TYPES = ["g1_29dof", "g1", "adam_pro"]
 
 @dataclass
 class ArgsConfigTemplate:
@@ -67,6 +68,7 @@ def override_wbc_config(
     key_to_value = {
         "INTERFACE": config.interface,
         "ENV_TYPE": config.env_type,
+        "ROBOT_TYPE": config.robot_type,
         "VERSION": config.wbc_version,
         "SIMULATOR": config.simulator,
         "SIMULATE_DT": 1 / float(config.sim_frequency),
@@ -104,6 +106,20 @@ def override_wbc_config(
     if config.env_type == "real":
         wbc_config["MOTOR_KD"][14] = wbc_config["MOTOR_KD"][14] - 10
 
+    if wbc_config.get("ROBOT_TYPE") == "adam_pro":
+        wbc_config["ADAM_POLICY_TYPE"] = config.adam_policy_type
+        wbc_config["ADAM_RETARGET_MAX_ITER"] = config.adam_retarget_max_iter
+        wbc_config["ADAM_RETARGET_EVERY_N"] = config.adam_retarget_every_n
+        wbc_config["ADAM_RETARGET_INPUT_EPSILON"] = config.adam_retarget_input_epsilon
+        wbc_config["ADAM_REFERENCE_VISUALIZATION"] = config.adam_reference_visualization
+        wbc_config["ADAM_G1_REFERENCE_ZMQ_HOST"] = config.adam_reference_zmq_host
+        wbc_config["ADAM_G1_REFERENCE_ZMQ_PORT"] = config.adam_reference_zmq_port
+        wbc_config["ADAM_G1_REFERENCE_TIMEOUT"] = config.adam_reference_timeout
+        if config.adam_policy_onnx_path is not None:
+            wbc_config["ADAM_POLICY_ONNX_PATH"] = config.adam_policy_onnx_path
+        if config.adam_tracking_onnx_path is not None:
+            wbc_config["ADAM_TRACKING_ONNX_PATH"] = config.adam_tracking_onnx_path
+
     return wbc_config
 
 
@@ -122,6 +138,9 @@ class BaseConfig(ArgsConfigTemplate):
 
     wbc_policy_class: str = "G1DecoupledWholeBodyPolicy"
     """Whole body policy class."""
+
+    robot_type: Literal[tuple(ROBOT_TYPES)] = "g1_29dof"
+    """Robot type to load in simulation."""
 
     # System Configuration
     interface: str = "sim"
@@ -204,6 +223,37 @@ class BaseConfig(ArgsConfigTemplate):
 
     enable_natural_walk: bool = False
     """Enable natural walk mode."""
+
+    # Adam Pro Configuration
+    adam_policy_type: Literal["tracking", "locomotion"] = "tracking"
+    """Adam policy adapter to use when robot_type is adam_pro."""
+
+    adam_policy_onnx_path: Optional[str] = None
+    """Override Adam locomotion ONNX path."""
+
+    adam_tracking_onnx_path: Optional[str] = None
+    """Override Adam tracking ONNX path."""
+
+    adam_retarget_max_iter: int = 5
+    """Maximum G1-to-Adam IK iterations per retarget solve."""
+
+    adam_retarget_every_n: int = 2
+    """Run G1-to-Adam retargeting once every N Adam policy ticks."""
+
+    adam_retarget_input_epsilon: float = 0.0
+    """Reuse previous retarget result when G1 joint input changes less than this."""
+
+    adam_reference_visualization: bool = True
+    """Show the retargeted Adam reference skeleton in the MuJoCo viewer."""
+
+    adam_reference_zmq_host: str = "localhost"
+    """Host publishing the SONIC g1_debug reference-motion stream."""
+
+    adam_reference_zmq_port: int = 5557
+    """Port publishing the SONIC g1_debug reference-motion stream."""
+
+    adam_reference_timeout: float = 0.5
+    """Seconds without a reference frame before Adam holds its current pose."""
 
     # Teleop/Device Configuration
     body_control_device: str = "dummy"
@@ -314,7 +364,15 @@ class BaseConfig(ArgsConfigTemplate):
         configs_dir = gear_sonic_path / "utils" / "mujoco_sim" / "wbc_configs"
 
         if self.wbc_version == "sonic_model12":
-            config_path = str(configs_dir / "g1_29dof_sonic_model12.yaml")
+            if self.robot_type == "adam_pro":
+                config_path = str(configs_dir / "adam_pro_sonic_model12.yaml")
+            elif self.robot_type in ["g1", "g1_29dof"]:
+                config_path = str(configs_dir / "g1_29dof_sonic_model12.yaml")
+            else:
+                raise ValueError(
+                    f"Invalid robot_type: {self.robot_type}, please use one of: "
+                    f"{', '.join(ROBOT_TYPES)}"
+                )
         else:
             raise ValueError(
                 f"Invalid wbc_version: {self.wbc_version}, please use one of: "

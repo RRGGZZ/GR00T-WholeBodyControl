@@ -7,6 +7,7 @@ so the WBC policy sees the sim as a real robot.
 
 import sys
 import threading
+import time
 from typing import Dict, Tuple
 
 import numpy as np
@@ -19,7 +20,6 @@ from unitree_sdk2py.idl.default import (
 )
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_
 from unitree_sdk2py.idl.unitree_hg.msg.dds_ import HandCmd_, HandState_, OdoState_
-
 
 class UnitreeSdk2Bridge:
     """
@@ -361,6 +361,229 @@ class UnitreeSdk2Bridge:
                 )
             index = index + self.mj_model.sensor_dim[i]
         print(" ")
+
+
+class AdamG1DecoderBridge:
+    """G1 DDS-compatible bridge for Adam tracking mode.
+
+    The deployment process still publishes Unitree G1 ``rt/lowcmd`` messages.
+    They are used only to close the virtual G1 control loop. Adam's tracking
+    reference comes from the deployment process's ``g1_debug`` output, which
+    exposes the current source-motion frame before the G1 control policy.
+    """
+
+    def __init__(self, config):
+        from unitree_sdk2py.idl.default import (
+            unitree_hg_msg_dds__HandState_ as HandState_default,
+            unitree_hg_msg_dds__IMUState_ as IMUState_default,
+            unitree_hg_msg_dds__LowCmd_,
+            unitree_hg_msg_dds__LowState_ as LowState_default,
+            unitree_hg_msg_dds__OdoState_ as OdoState_default,
+        )
+        from unitree_sdk2py.idl.unitree_hg.msg.dds_ import (
+            HandState_,
+            IMUState_,
+            LowCmd_,
+            LowState_,
+        )
+
+        self.num_body_motor = int(config.get("ADAM_G1_NUM_MOTORS", 29))
+        self.num_hand_motor = 0
+        self.use_sensor = False
+
+        self.default_g1_q = np.asarray(
+            config.get("ADAM_G1_DEFAULT_DOF_POS", np.zeros(self.num_body_motor)),
+            dtype=np.float32,
+        )
+        if self.default_g1_q.shape != (self.num_body_motor,):
+            raise ValueError(
+                f"ADAM_G1_DEFAULT_DOF_POS must contain {self.num_body_motor} values"
+        )
+        self.virtual_g1_q = self.default_g1_q.copy()
+        self.virtual_g1_dq = np.zeros(self.num_body_motor, dtype=np.float32)
+
+        self.reference_source = config.get("ADAM_G1_REFERENCE_SOURCE", "zmq")
+        if self.reference_source not in {"zmq", "lowcmd"}:
+            raise ValueError(
+                f"Unsupported ADAM_G1_REFERENCE_SOURCE={self.reference_source!r}; "
+                "expected 'zmq' or 'lowcmd'."
+            )
+        self.reference_timeout = float(config.get("ADAM_G1_REFERENCE_TIMEOUT", 0.5))
+        self.reference_root_pos = np.asarray(
+            config.get("ADAM_G1_DEFAULT_ROOT_POS", [0.0, 0.0, 0.793]), dtype=np.float32
+        )
+        self.reference_root_quat_wxyz = np.asarray(
+            config.get("ADAM_G1_DEFAULT_ROOT_QUAT_WXYZ", [1.0, 0.0, 0.0, 0.0]),
+            dtype=np.float32,
+        )
+        self.reference_g1_q = self.default_g1_q.copy()
+        self.reference_last_update = None
+        self.reference_message_error_reported = False
+        self.reference_subscriber = None
+        if self.reference_source == "zmq":
+            from gear_sonic.utils.data_collection.zmq_state_subscriber import ZMQStateSubscriber
+
+            self.reference_subscriber = ZMQStateSubscriber(
+                host=config.get("ADAM_G1_REFERENCE_ZMQ_HOST", "localhost"),
+                port=int(config.get("ADAM_G1_REFERENCE_ZMQ_PORT", 5557)),
+                topic=config.get("ADAM_G1_REFERENCE_ZMQ_TOPIC", "g1_debug"),
+            )
+
+        self.low_cmd = unitree_hg_msg_dds__LowCmd_()
+        self.low_cmd_lock = threading.Lock()
+        self.low_cmd_received = False
+        self.new_low_cmd = False
+        self.low_cmd_last_update = None
+
+        self.low_state = LowState_default()
+        self.low_state_puber = ChannelPublisher("rt/lowstate", LowState_)
+        self.low_state_puber.Init()
+
+        self.odo_state = OdoState_default()
+        self.odo_state_puber = ChannelPublisher("rt/odostate", OdoState_)
+        self.odo_state_puber.Init()
+
+        self.torso_imu_state = IMUState_default()
+        self.torso_imu_puber = ChannelPublisher("rt/secondary_imu", IMUState_)
+        self.torso_imu_puber.Init()
+
+        self.left_hand_state = HandState_default()
+        self.left_hand_state_puber = ChannelPublisher("rt/dex3/left/state", HandState_)
+        self.left_hand_state_puber.Init()
+        self.right_hand_state = HandState_default()
+        self.right_hand_state_puber = ChannelPublisher("rt/dex3/right/state", HandState_)
+        self.right_hand_state_puber.Init()
+
+        self.low_cmd_suber = ChannelSubscriber("rt/lowcmd", LowCmd_)
+        self.low_cmd_suber.Init(self.LowCmdHandler, 1)
+
+        self.joystick = None
+
+    def reset(self):
+        with self.low_cmd_lock:
+            self.low_cmd_received = False
+            self.new_low_cmd = False
+            self.virtual_g1_q[:] = self.default_g1_q
+            self.virtual_g1_dq[:] = 0.0
+            self.low_cmd_last_update = None
+        self.reference_g1_q[:] = self.default_g1_q
+        self.reference_last_update = None
+
+    def LowCmdHandler(self, msg):
+        with self.low_cmd_lock:
+            self.low_cmd = msg
+            for i in range(self.num_body_motor):
+                self.virtual_g1_q[i] = msg.motor_cmd[i].q
+                self.virtual_g1_dq[i] = msg.motor_cmd[i].dq
+            self.low_cmd_received = True
+            self.new_low_cmd = True
+            self.low_cmd_last_update = time.monotonic()
+
+    def cmd_received(self):
+        with self.low_cmd_lock:
+            return self.low_cmd_received
+
+    def _poll_zmq_reference(self):
+        message = self.reference_subscriber.get_msg(clear=True)
+        if message is None:
+            return
+        try:
+            dof_pos = np.asarray(message["body_q_target"], dtype=np.float32)
+            root_pos = np.asarray(message["base_trans_target"], dtype=np.float32)
+            root_quat = np.asarray(message["base_quat_target"], dtype=np.float32)
+            if dof_pos.shape != (self.num_body_motor,):
+                raise ValueError(f"body_q_target has shape {dof_pos.shape}")
+            if root_pos.shape != (3,):
+                raise ValueError(f"base_trans_target has shape {root_pos.shape}")
+            if root_quat.shape != (4,):
+                raise ValueError(f"base_quat_target has shape {root_quat.shape}")
+            if not (np.all(np.isfinite(dof_pos)) and np.all(np.isfinite(root_pos))):
+                raise ValueError("reference contains non-finite position values")
+            quat_norm = float(np.linalg.norm(root_quat))
+            if not np.isfinite(quat_norm) or quat_norm < 1e-6:
+                raise ValueError("base_quat_target is not a valid quaternion")
+        except (KeyError, ValueError) as exc:
+            if not self.reference_message_error_reported:
+                print(f"Invalid Adam G1 reference message on g1_debug: {exc}")
+                self.reference_message_error_reported = True
+            return
+
+        self.reference_g1_q = dof_pos
+        self.reference_root_pos = root_pos
+        self.reference_root_quat_wxyz = root_quat / quat_norm
+        self.reference_last_update = time.monotonic()
+        self.reference_message_error_reported = False
+
+    def get_g1_reference(self) -> dict[str, np.ndarray] | None:
+        if self.reference_source == "zmq":
+            self._poll_zmq_reference()
+            last_update = self.reference_last_update
+            if last_update is None or time.monotonic() - last_update > self.reference_timeout:
+                return None
+            return {
+                "dof_pos": self.reference_g1_q.copy(),
+                "root_pos": self.reference_root_pos.copy(),
+                "root_quat_wxyz": self.reference_root_quat_wxyz.copy(),
+            }
+
+        with self.low_cmd_lock:
+            if (
+                self.low_cmd_last_update is None
+                or time.monotonic() - self.low_cmd_last_update > self.reference_timeout
+            ):
+                return None
+            return {
+                "dof_pos": self.virtual_g1_q.copy(),
+                "root_pos": self.reference_root_pos.copy(),
+                "root_quat_wxyz": self.reference_root_quat_wxyz.copy(),
+            }
+
+    def get_g1_reference_dof_pos(self) -> np.ndarray | None:
+        reference = self.get_g1_reference()
+        return None if reference is None else reference["dof_pos"]
+
+    def close(self):
+        if self.reference_subscriber is not None:
+            self.reference_subscriber.close()
+            self.reference_subscriber = None
+
+    def PublishLowState(self, obs: Dict[str, any]):
+        with self.low_cmd_lock:
+            body_q = self.virtual_g1_q.copy()
+            body_dq = self.virtual_g1_dq.copy()
+
+        for i in range(self.num_body_motor):
+            self.low_state.motor_state[i].q = float(body_q[i])
+            self.low_state.motor_state[i].dq = float(body_dq[i])
+            self.low_state.motor_state[i].ddq = 0.0
+            self.low_state.motor_state[i].tau_est = 0.0
+
+        self.odo_state.position[:] = obs["floating_base_pose"][:3]
+        self.odo_state.linear_velocity[:] = obs["floating_base_vel"][:3]
+        self.odo_state.orientation[:] = obs["floating_base_pose"][3:7]
+        self.odo_state.angular_velocity[:] = obs["floating_base_vel"][3:6]
+
+        self.low_state.imu_state.quaternion[:] = obs["floating_base_pose"][3:7]
+        self.low_state.imu_state.gyroscope[:] = obs["floating_base_vel"][3:6]
+        self.low_state.imu_state.accelerometer[:] = obs["floating_base_acc"][:3]
+
+        self.torso_imu_state.quaternion[:] = obs["secondary_imu_quat"]
+        self.torso_imu_state.gyroscope[:] = obs["secondary_imu_vel"][3:6]
+
+        self.low_state.tick = int(obs["time"] * 1e3)
+        self.low_state_puber.Write(self.low_state)
+
+        self.odo_state.tick = int(obs["time"] * 1e3)
+        self.odo_state_puber.Write(self.odo_state)
+        self.torso_imu_puber.Write(self.torso_imu_state)
+        self.left_hand_state_puber.Write(self.left_hand_state)
+        self.right_hand_state_puber.Write(self.right_hand_state)
+
+    def PublishWirelessController(self):
+        return
+
+    def SetupJoystick(self, device_id=0, js_type="xbox"):
+        raise NotImplementedError("Joystick publishing is not implemented for Adam tracking mode")
 
 
 class ElasticBand:

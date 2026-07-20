@@ -15,6 +15,13 @@ def init_channel(config: Dict[str, Any]) -> None:
     Args:
         config: Configuration dictionary containing DOMAIN_ID and optionally INTERFACE
     """
+    if (
+        config.get("ROBOT_TYPE") == "adam_pro"
+        and config.get("ADAM_CONTROL_MODE") == "onnx"
+        and config.get("ADAM_POLICY_TYPE", "locomotion") == "locomotion"
+    ):
+        return
+
     if config.get("INTERFACE", None):
         ChannelFactoryInitialize(config["DOMAIN_ID"], config["INTERFACE"])
     else:

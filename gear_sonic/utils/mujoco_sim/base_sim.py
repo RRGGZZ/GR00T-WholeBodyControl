@@ -23,10 +23,51 @@ from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
 from gear_sonic.utils.mujoco_sim.metric_utils import check_contact, check_height
 from gear_sonic.utils.mujoco_sim.sim_utils import get_subtree_body_names
-from gear_sonic.utils.mujoco_sim.unitree_sdk2py_bridge import ElasticBand, UnitreeSdk2Bridge
+from gear_sonic.utils.mujoco_sim.unitree_sdk2py_bridge import (
+    AdamG1DecoderBridge,
+    ElasticBand,
+    UnitreeSdk2Bridge,
+)
 from gear_sonic.utils.mujoco_sim.robot import Robot
+from gear_sonic.utils.mujoco_sim.adam_onnx_policy import (
+    AdamG1Retargeter,
+    AdamOnnxPolicy,
+    AdamTrackingOnnxPolicy,
+    AdamTrackingReferenceBuilder,
+)
 
 GEAR_SONIC_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+
+ADAM_REFERENCE_SKELETON_EDGES = (
+    (0, 13),
+    (13, 14),
+    (14, 15),
+    (15, 26),
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 4),
+    (4, 5),
+    (5, 6),
+    (6, 27),
+    (0, 7),
+    (7, 8),
+    (8, 9),
+    (9, 10),
+    (10, 11),
+    (11, 12),
+    (12, 28),
+    (15, 16),
+    (16, 17),
+    (17, 18),
+    (18, 19),
+    (19, 24),
+    (15, 20),
+    (20, 21),
+    (21, 22),
+    (22, 23),
+    (23, 25),
+)
 
 
 class DefaultEnv:
@@ -44,6 +85,11 @@ class DefaultEnv:
         self.config = config
         self.env_name = env_name
         self.robot = Robot(self.config)
+        self.robot_type = self.config.get("ROBOT_TYPE", "g1_29dof")
+        self.is_adam_onnx = (
+            self.robot_type == "adam_pro" and self.config.get("ADAM_CONTROL_MODE") == "onnx"
+        )
+        self.adam_policy_type = self.config.get("ADAM_POLICY_TYPE", "locomotion")
         self.num_body_dof = self.robot.NUM_JOINTS
         self.num_hand_dof = self.robot.NUM_HAND_JOINTS
         self.sim_dt = self.config["SIMULATE_DT"]
@@ -60,8 +106,40 @@ class DefaultEnv:
         self.reward_lock = Lock()
         self.unitree_bridge = None
         self.onscreen = onscreen
+        self.elastic_band = None
+        self.adam_policy = None
+        self.adam_policy_counter = 0
+        self.adam_policy_decimation = 1
+        self.adam_target_q = None
+        self.adam_tracking_body_ids = None
+        self.adam_tracking_extend_parent_ids = None
+        self.adam_tracking_extend_pos = None
+        self.adam_tracking_extend_rot_xyzw = None
+        self.adam_tracking_reference_active = False
+        self.adam_reference_visualization_enabled = bool(
+            self.is_adam_onnx
+            and self.adam_policy_type == "tracking"
+            and self.config.get("ADAM_REFERENCE_VISUALIZATION", True)
+        )
+        self.adam_reference_marker_size = float(
+            self.config.get("ADAM_REFERENCE_MARKER_SIZE", 0.025)
+        )
+        self.adam_reference_link_radius = float(
+            self.config.get("ADAM_REFERENCE_LINK_RADIUS", 0.008)
+        )
+        self.adam_reference_color = np.asarray(
+            self.config.get("ADAM_REFERENCE_COLOR", [0.1, 1.0, 0.25, 0.85]),
+            dtype=np.float32,
+        )
+        if self.adam_reference_color.shape != (4,):
+            raise ValueError("ADAM_REFERENCE_COLOR must contain four RGBA values")
 
         self.init_scene()
+        if self.is_adam_onnx:
+            self.init_adam_controller()
+            self.torques = np.zeros(self.mj_model.nu)
+            self.torque_limit = self.adam_torque_limit.copy()
+            self.reset()
         self.last_reward = 0
 
         self.offscreen = offscreen
@@ -150,21 +228,28 @@ class DefaultEnv:
         self.mj_model = mujoco.MjModel.from_xml_path(xml_path)
         self.mj_data = mujoco.MjData(self.mj_model)
         self.mj_model.opt.timestep = self.sim_dt
-        self.torso_index = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, "torso_link")
-        self.root_body = "pelvis"
+        self.torso_body = self.config.get("TORSO_BODY", "torso_link")
+        self.torso_index = mujoco.mj_name2id(
+            self.mj_model, mujoco.mjtObj.mjOBJ_BODY, self.torso_body
+        )
+        if self.torso_index == -1:
+            raise ValueError(f"Torso body '{self.torso_body}' not found in MuJoCo model")
+        self.root_body = self.config.get("ROOT_BODY", "pelvis")
         self.root_body_id = self.mj_model.body(self.root_body).id
 
         self.joint_class_map = self._get_dof_indices_by_class()
 
         self.perform_sysid_search = self.config.get("perform_sysid_search", False)
 
+        root_joint_candidates = [
+            self.config.get("FLOATING_BASE_JOINT", "floating_base_joint"),
+            "floating_base_joint",
+            "floating_base",
+        ]
+        joint_names = [self.mj_model.joint(i).name for i in range(self.mj_model.njnt)]
         # Check for static root link (fixed base)
-        self.use_floating_root_link = "floating_base_joint" in [
-            self.mj_model.joint(i).name for i in range(self.mj_model.njnt)
-        ]
-        self.use_constrained_root_link = "constrained_base_joint" in [
-            self.mj_model.joint(i).name for i in range(self.mj_model.njnt)
-        ]
+        self.use_floating_root_link = any(name in joint_names for name in root_joint_candidates)
+        self.use_constrained_root_link = "constrained_base_joint" in joint_names
 
         # MuJoCo qpos/qvel arrays start with root DOFs before joint DOFs:
         # floating base has 7 qpos (pos + quat) and 6 qvel (lin + ang velocity)
@@ -184,7 +269,9 @@ class DefaultEnv:
         # Enable the elastic band
         if self.config["ENABLE_ELASTIC_BAND"] and self.use_floating_root_link:
             self.elastic_band = ElasticBand()
-            if "g1" in self.config["ROBOT_TYPE"]:
+            if self.config["ROBOT_TYPE"] == "adam_pro":
+                self.band_attached_link = self.mj_model.body(self.root_body).id
+            elif "g1" in self.config["ROBOT_TYPE"]:
                 if self.config["enable_waist"]:
                     self.band_attached_link = self.mj_model.body("pelvis").id
                 else:
@@ -198,7 +285,7 @@ class DefaultEnv:
                 self.viewer = mujoco.viewer.launch_passive(
                     self.mj_model,
                     self.mj_data,
-                    key_callback=self.elastic_band.MujuocoKeyCallback,
+                    key_callback=self._mujoco_key_callback,
                     show_left_ui=False,
                     show_right_ui=False,
                 )
@@ -208,7 +295,11 @@ class DefaultEnv:
         else:
             if self.onscreen:
                 self.viewer = mujoco.viewer.launch_passive(
-                    self.mj_model, self.mj_data, show_left_ui=False, show_right_ui=False
+                    self.mj_model,
+                    self.mj_data,
+                    key_callback=self._mujoco_key_callback,
+                    show_left_ui=False,
+                    show_right_ui=False,
                 )
             else:
                 mujoco.mj_forward(self.mj_model, self.mj_data)
@@ -220,32 +311,278 @@ class DefaultEnv:
             self.viewer.cam.distance = 2.0
             self.viewer.cam.lookat = np.array([0, 0, 0.5])
             self.viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
-            self.viewer.cam.trackbodyid = self.mj_model.body("pelvis").id
+            self.viewer.cam.trackbodyid = self.mj_model.body(self.root_body).id
 
-        self.body_joint_index = []
-        self.left_hand_index = []
-        self.right_hand_index = []
-        for i in range(self.mj_model.njnt):
-            name = self.mj_model.joint(i).name
-            if any(
+        if self.is_adam_onnx:
+            self.body_joint_index = np.array(
                 [
-                    part_name in name
-                    for part_name in ["hip", "knee", "ankle", "waist", "shoulder", "elbow", "wrist"]
+                    self.mj_model.joint(name).id
+                    for name in self.config["ADAM_ACTUATOR_NAMES"]
+                    if mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, name) != -1
                 ]
-            ):
-                self.body_joint_index.append(i)
-            elif "left_hand" in name:
-                self.left_hand_index.append(i)
-            elif "right_hand" in name:
-                self.right_hand_index.append(i)
+            )
+            self.left_hand_index = np.array([], dtype=int)
+            self.right_hand_index = np.array([], dtype=int)
+        else:
+            self.body_joint_index = []
+            self.left_hand_index = []
+            self.right_hand_index = []
+            for i in range(self.mj_model.njnt):
+                name = self.mj_model.joint(i).name
+                if any(
+                    [
+                        part_name in name
+                        for part_name in [
+                            "hip",
+                            "knee",
+                            "ankle",
+                            "waist",
+                            "shoulder",
+                            "elbow",
+                            "wrist",
+                        ]
+                    ]
+                ):
+                    self.body_joint_index.append(i)
+                elif "left_hand" in name:
+                    self.left_hand_index.append(i)
+                elif "right_hand" in name:
+                    self.right_hand_index.append(i)
 
-        assert len(self.body_joint_index) == self.robot.NUM_JOINTS
-        assert len(self.left_hand_index) == self.robot.NUM_HAND_JOINTS
-        assert len(self.right_hand_index) == self.robot.NUM_HAND_JOINTS
+            assert len(self.body_joint_index) == self.robot.NUM_JOINTS
+            assert len(self.left_hand_index) == self.robot.NUM_HAND_JOINTS
+            assert len(self.right_hand_index) == self.robot.NUM_HAND_JOINTS
 
-        self.body_joint_index = np.array(self.body_joint_index)
-        self.left_hand_index = np.array(self.left_hand_index)
-        self.right_hand_index = np.array(self.right_hand_index)
+            self.body_joint_index = np.array(self.body_joint_index)
+            self.left_hand_index = np.array(self.left_hand_index)
+            self.right_hand_index = np.array(self.right_hand_index)
+
+    def _joint_qpos_qvel_indices(self, joint_name: str) -> tuple[int, int]:
+        joint_id = mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+        if joint_id == -1:
+            raise ValueError(f"Joint '{joint_name}' not found in MuJoCo model")
+        return int(self.mj_model.jnt_qposadr[joint_id]), int(self.mj_model.jnt_dofadr[joint_id])
+
+    def init_adam_controller(self):
+        self.adam_actuator_names = list(self.config["ADAM_ACTUATOR_NAMES"])
+        if len(self.adam_actuator_names) != self.mj_model.nu:
+            raise ValueError(
+                f"Adam config has {len(self.adam_actuator_names)} actuators, "
+                f"but MuJoCo model has {self.mj_model.nu}"
+            )
+
+        self.adam_actuator_ids = np.array(
+            [
+                mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+                for name in self.adam_actuator_names
+            ],
+            dtype=int,
+        )
+        if np.any(self.adam_actuator_ids < 0):
+            missing = [
+                name for name, idx in zip(self.adam_actuator_names, self.adam_actuator_ids) if idx < 0
+            ]
+            raise ValueError(f"Adam actuator(s) not found in MuJoCo model: {missing}")
+
+        self.adam_actuator_joint_names = []
+        for actuator_id in self.adam_actuator_ids:
+            joint_id = int(self.mj_model.actuator_trnid[actuator_id, 0])
+            self.adam_actuator_joint_names.append(self.mj_model.joint(joint_id).name)
+
+        self.adam_actuator_qpos_ids = np.array(
+            [self._joint_qpos_qvel_indices(name)[0] for name in self.adam_actuator_joint_names],
+            dtype=int,
+        )
+        self.adam_actuator_qvel_ids = np.array(
+            [self._joint_qpos_qvel_indices(name)[1] for name in self.adam_actuator_joint_names],
+            dtype=int,
+        )
+        self.adam_policy_joint_names = list(self.config["ADAM_POLICY_JOINT_NAMES"])
+        self.adam_policy_qpos_ids = np.array(
+            [self._joint_qpos_qvel_indices(name)[0] for name in self.adam_policy_joint_names],
+            dtype=int,
+        )
+        self.adam_policy_qvel_ids = np.array(
+            [self._joint_qpos_qvel_indices(name)[1] for name in self.adam_policy_joint_names],
+            dtype=int,
+        )
+
+        self.adam_policy_to_actuator_ids = np.array(
+            [self.adam_actuator_names.index(name) for name in self.adam_policy_joint_names],
+            dtype=int,
+        )
+        self.adam_default_actuator_q = np.asarray(
+            self.config["DEFAULT_MOTOR_ANGLES"], dtype=np.float32
+        )
+        if self.adam_policy_type == "tracking" and "ADAM_TRACKING_DEFAULT_MOTOR_ANGLES" in self.config:
+            self.adam_default_actuator_q = np.asarray(
+                self.config["ADAM_TRACKING_DEFAULT_MOTOR_ANGLES"], dtype=np.float32
+            )
+        self.adam_motor_kp = np.asarray(self.config["MOTOR_KP"], dtype=np.float32)
+        self.adam_motor_kd = np.asarray(self.config["MOTOR_KD"], dtype=np.float32)
+        self.adam_torque_limit = np.asarray(
+            self.config["motor_effort_limit_list"], dtype=np.float32
+        )
+        self.adam_motor_pos_lower = np.asarray(
+            self.config["motor_pos_lower_limit_list"], dtype=np.float32
+        )
+        self.adam_motor_pos_upper = np.asarray(
+            self.config["motor_pos_upper_limit_list"], dtype=np.float32
+        )
+
+        if self.adam_policy_type == "locomotion":
+            self.adam_policy = AdamOnnxPolicy(
+                onnx_path=self.config["ADAM_POLICY_ONNX_PATH"],
+                joint_names=self.adam_policy_joint_names,
+                default_dof_pos=self.config["ADAM_POLICY_DEFAULT_DOF_POS"],
+                kp=self.config["ADAM_POLICY_KP"],
+                effort_limit=self.config["ADAM_POLICY_EFFORT_LIMIT"],
+                control_dt=self.config.get("ADAM_POLICY_DT", 0.02),
+                cycle_time=self.config.get("ADAM_POLICY_CYCLE_TIME", 0.8),
+                command=self.config.get("ADAM_COMMAND", [0.0, 0.0, 0.0]),
+            )
+        elif self.adam_policy_type == "tracking":
+            self._init_adam_tracking_controller()
+        else:
+            raise ValueError(
+                f"Unsupported ADAM_POLICY_TYPE={self.adam_policy_type!r}; "
+                "expected 'locomotion' or 'tracking'."
+            )
+        self.adam_policy_decimation = max(
+            1, int(round(float(self.config.get("ADAM_POLICY_DT", 0.02)) / self.sim_dt))
+        )
+        self.adam_policy_counter = 0
+        self.adam_target_q = self.adam_default_actuator_q.copy()
+
+    def _init_adam_tracking_controller(self):
+        tracking_body_names = list(self.config["ADAM_TRACKING_BODY_NAMES"])
+        tracking_extend_config = list(self.config["ADAM_TRACKING_EXTEND_CONFIG"])
+
+        self.adam_tracking_body_ids = np.array(
+            [
+                mujoco.mj_name2id(self.mj_model, mujoco.mjtObj.mjOBJ_BODY, name)
+                for name in tracking_body_names
+            ],
+            dtype=int,
+        )
+        if np.any(self.adam_tracking_body_ids < 0):
+            missing = [
+                name
+                for name, idx in zip(tracking_body_names, self.adam_tracking_body_ids)
+                if idx < 0
+            ]
+            raise ValueError(f"Adam tracking body(s) not found in MuJoCo model: {missing}")
+
+        extend_parent_ids = []
+        extend_pos = []
+        extend_rot_xyzw = []
+        for item in tracking_extend_config:
+            parent_id = mujoco.mj_name2id(
+                self.mj_model, mujoco.mjtObj.mjOBJ_BODY, item["parent_name"]
+            )
+            if parent_id == -1:
+                raise ValueError(
+                    f"Adam tracking extend parent not found: {item['parent_name']}"
+                )
+            extend_parent_ids.append(parent_id)
+            extend_pos.append(item["pos"])
+            rot_wxyz = np.asarray(item["rot"], dtype=np.float32)
+            extend_rot_xyzw.append(rot_wxyz[[1, 2, 3, 0]])
+        self.adam_tracking_extend_parent_ids = np.asarray(extend_parent_ids, dtype=int)
+        self.adam_tracking_extend_pos = np.asarray(extend_pos, dtype=np.float32)
+        self.adam_tracking_extend_rot_xyzw = np.asarray(extend_rot_xyzw, dtype=np.float32)
+
+        retargeter = AdamG1Retargeter(
+            package_root=self.config.get(
+                "ADAM_RETARGETING_ROOT", "/home/r/Downloads/robot_to_robot_retargeting"
+            ),
+            g1_default_dof_pos=self.config["ADAM_G1_DEFAULT_DOF_POS"],
+            g1_default_root_pos=self.config.get("ADAM_G1_DEFAULT_ROOT_POS", [0.0, 0.0, 0.793]),
+            g1_default_root_quat_wxyz=self.config.get(
+                "ADAM_G1_DEFAULT_ROOT_QUAT_WXYZ", [1.0, 0.0, 0.0, 0.0]
+            ),
+            max_iter=self.config.get("ADAM_RETARGET_MAX_ITER", 5),
+            solver=self.config.get("ADAM_RETARGET_SOLVER", "daqp"),
+            damping=self.config.get("ADAM_RETARGET_DAMPING", 5e-1),
+            retarget_every_n=self.config.get("ADAM_RETARGET_EVERY_N", 1),
+            input_epsilon=self.config.get("ADAM_RETARGET_INPUT_EPSILON", 0.0),
+            verbose=self.config.get("ADAM_RETARGET_VERBOSE", False),
+        )
+        reference_builder = AdamTrackingReferenceBuilder(
+            adam_policy_joint_names=self.adam_policy_joint_names,
+            fk_xml_path=self.config.get(
+                "ADAM_TRACKING_FK_XML_PATH",
+                "/home/r/Downloads/HumanoidVLA_MJ/example/python/humanoidverse/data/robots/adam_sp/adam_lite_Optim.xml",
+            ),
+            source_xml_path=str(
+                pathlib.Path(GEAR_SONIC_ROOT) / self.config["ROBOT_SCENE"]
+            ),
+            body_names=tracking_body_names,
+            extend_config=tracking_extend_config,
+            fk_body_names=self.config.get("ADAM_TRACKING_FK_BODY_NAMES", tracking_body_names),
+            fk_extend_config=self.config.get(
+                "ADAM_TRACKING_FK_EXTEND_CONFIG", tracking_extend_config
+            ),
+            future_steps=self.config.get("ADAM_TRACKING_FUTURE_STEPS", 10),
+        )
+        self.adam_policy = AdamTrackingOnnxPolicy(
+            onnx_path=self.config.get("ADAM_TRACKING_ONNX_PATH", self.config["ADAM_POLICY_ONNX_PATH"]),
+            joint_names=self.adam_policy_joint_names,
+            default_dof_pos=self.config.get(
+                "ADAM_TRACKING_POLICY_DEFAULT_DOF_POS",
+                self.config["ADAM_POLICY_DEFAULT_DOF_POS"],
+            ),
+            kp=self.config.get("ADAM_TRACKING_POLICY_KP", self.config["ADAM_POLICY_KP"]),
+            effort_limit=self.config.get(
+                "ADAM_TRACKING_POLICY_EFFORT_LIMIT",
+                self.config["ADAM_POLICY_EFFORT_LIMIT"],
+            ),
+            retargeter=retargeter,
+            reference_builder=reference_builder,
+            control_dt=self.config.get("ADAM_POLICY_DT", 0.02),
+            command=self.config.get("ADAM_COMMAND", [0.0, 0.0, 0.0]),
+            history_len=self.config.get("ADAM_TRACKING_HISTORY_LEN", 10),
+            future_steps=self.config.get("ADAM_TRACKING_FUTURE_STEPS", 10),
+            clip_observations=self.config.get("ADAM_CLIP_OBSERVATIONS", 100.0),
+            clip_actions=self.config.get("ADAM_CLIP_ACTIONS", 100.0),
+        )
+
+    def _get_adam_tracking_body_positions(self) -> np.ndarray:
+        body_pos = self.mj_data.xpos[self.adam_tracking_body_ids].copy()
+        if len(self.adam_tracking_extend_parent_ids) == 0:
+            return body_pos.astype(np.float32)
+
+        parent_pos = self.mj_data.xpos[self.adam_tracking_extend_parent_ids].copy()
+        parent_rot_xyzw = self.mj_data.xquat[self.adam_tracking_extend_parent_ids][
+            :, [1, 2, 3, 0]
+        ].copy()
+        rotated = np.array(
+            [
+                Rotation.from_quat(parent_rot_xyzw[i]).apply(self.adam_tracking_extend_pos[i])
+                for i in range(len(self.adam_tracking_extend_parent_ids))
+            ],
+            dtype=np.float32,
+        )
+        extend_pos = np.array(
+            [
+                Rotation.from_quat(self.adam_tracking_extend_rot_xyzw[i]).apply(rotated[i])
+                + parent_pos[i]
+                for i in range(len(self.adam_tracking_extend_parent_ids))
+            ],
+            dtype=np.float32,
+        )
+        return np.concatenate([body_pos, extend_pos], axis=0).astype(np.float32)
+
+    def _get_g1_decoder_reference(self) -> dict[str, np.ndarray] | None:
+        if self.unitree_bridge is None:
+            return None
+        if hasattr(self.unitree_bridge, "get_g1_reference"):
+            return self.unitree_bridge.get_g1_reference()
+        if hasattr(self.unitree_bridge, "get_g1_reference_dof_pos"):
+            dof_pos = self.unitree_bridge.get_g1_reference_dof_pos()
+            if dof_pos is not None:
+                return {"dof_pos": dof_pos, "root_pos": None, "root_quat_wxyz": None}
+        return None
 
     def init_renderers(self):
         self.renderers = {}
@@ -287,10 +624,75 @@ class DefaultEnv:
                     )
         return body_torques
 
+    def compute_adam_torques(self) -> np.ndarray:
+        if self.adam_policy is None:
+            raise RuntimeError("Adam ONNX policy is not initialized")
+
+        if self.adam_policy_counter % self.adam_policy_decimation == 0:
+            base_quat_xyzw = self.mj_data.qpos[3:7][[1, 2, 3, 0]].copy()
+            base_velocity = np.zeros(6)
+            mujoco.mj_objectVelocity(
+                self.mj_model,
+                self.mj_data,
+                mujoco.mjtObj.mjOBJ_BODY,
+                self.root_body_id,
+                base_velocity,
+                1,
+            )
+            base_ang_vel = base_velocity[:3].copy()
+            policy_q = self.mj_data.qpos[self.adam_policy_qpos_ids].copy()
+            policy_dq = self.mj_data.qvel[self.adam_policy_qvel_ids].copy()
+            if self.adam_policy_type == "tracking":
+                reference = self._get_g1_decoder_reference()
+                if reference is None:
+                    if self.adam_tracking_reference_active:
+                        print("Adam PND reference timed out; holding the current pose")
+                        self.adam_policy.reset()
+                        self.adam_target_q = self.mj_data.qpos[
+                            self.adam_actuator_qpos_ids
+                        ].copy()
+                    self.adam_tracking_reference_active = False
+                    target_q = None
+                else:
+                    if not self.adam_tracking_reference_active:
+                        self.adam_policy.reset()
+                        print("Adam PND reference connected; tracking source motion")
+                    self.adam_tracking_reference_active = True
+                    target_q, _ = self.adam_policy.compute_target(
+                        root_pos=self.mj_data.qpos[:3].copy(),
+                        base_quat_xyzw=base_quat_xyzw,
+                        base_ang_vel=base_ang_vel,
+                        dof_pos=policy_q,
+                        dof_vel=policy_dq,
+                        current_body_positions=self._get_adam_tracking_body_positions(),
+                        g1_reference_dof_pos=reference["dof_pos"],
+                        g1_reference_root_pos=reference["root_pos"],
+                        g1_reference_root_quat_wxyz=reference["root_quat_wxyz"],
+                    )
+            else:
+                target_q, _ = self.adam_policy.compute_target(
+                    base_quat_xyzw=base_quat_xyzw,
+                    base_ang_vel=base_ang_vel,
+                    dof_pos=policy_q,
+                    dof_vel=policy_dq,
+                )
+            if target_q is not None:
+                self.adam_target_q = self.adam_default_actuator_q.copy()
+                self.adam_target_q[self.adam_policy_to_actuator_ids] = target_q
+                self.adam_target_q = np.clip(
+                    self.adam_target_q, self.adam_motor_pos_lower, self.adam_motor_pos_upper
+                )
+        self.adam_policy_counter += 1
+
+        q = self.mj_data.qpos[self.adam_actuator_qpos_ids]
+        dq = self.mj_data.qvel[self.adam_actuator_qvel_ids]
+        torques = self.adam_motor_kp * (self.adam_target_q - q) - self.adam_motor_kd * dq
+        return np.clip(torques, -self.adam_torque_limit, self.adam_torque_limit)
+
     def get_head_pose(self) -> np.ndarray:
-        root_pos = self.mj_data.body("torso_link").xpos.copy()
+        root_pos = self.mj_data.body(self.torso_body).xpos.copy()
         # Reorder quaternion from MuJoCo [w,x,y,z] to scipy [x,y,z,w]
-        root_quat = self.mj_data.body("torso_link").xquat.copy()[[1, 2, 3, 0]]
+        root_quat = self.mj_data.body(self.torso_body).xquat.copy()[[1, 2, 3, 0]]
         head_pos = root_pos + Rotation.from_quat(root_quat).apply(np.array([0.0, 0.0, -0.044]))
         return np.concatenate((head_pos, root_quat))
 
@@ -359,7 +761,7 @@ class DefaultEnv:
         obs["secondary_imu_quat"] = self.mj_data.xquat[self.torso_index]
 
         pose = np.zeros(13)
-        torso_link = self.mj_model.body("torso_link").id
+        torso_link = self.mj_model.body(self.torso_body).id
         # mj_objectVelocity returns [ang_vel, lin_vel]; swap to [lin_vel, ang_vel]
         mujoco.mj_objectVelocity(
             self.mj_model, self.mj_data, mujoco.mjtObj.mjOBJ_BODY, torso_link, pose[7:13], 1
@@ -370,10 +772,16 @@ class DefaultEnv:
         )
         obs["secondary_imu_vel"] = pose[7:13]
 
-        obs["body_q"] = self.mj_data.qpos[self.body_joint_index + 7 - 1]
-        obs["body_dq"] = self.mj_data.qvel[self.body_joint_index + 6 - 1]
-        obs["body_ddq"] = self.mj_data.qacc[self.body_joint_index + 6 - 1]
-        obs["body_tau_est"] = self.mj_data.actuator_force[self.body_joint_index - 1]
+        if self.is_adam_onnx:
+            obs["body_q"] = self.mj_data.qpos[self.adam_actuator_qpos_ids]
+            obs["body_dq"] = self.mj_data.qvel[self.adam_actuator_qvel_ids]
+            obs["body_ddq"] = self.mj_data.qacc[self.adam_actuator_qvel_ids]
+            obs["body_tau_est"] = self.mj_data.actuator_force[self.adam_actuator_ids]
+        else:
+            obs["body_q"] = self.mj_data.qpos[self.body_joint_index + 7 - 1]
+            obs["body_dq"] = self.mj_data.qvel[self.body_joint_index + 6 - 1]
+            obs["body_ddq"] = self.mj_data.qacc[self.body_joint_index + 6 - 1]
+            obs["body_tau_est"] = self.mj_data.actuator_force[self.body_joint_index - 1]
         if self.num_hand_dof > 0:
             obs["left_hand_q"] = self.mj_data.qpos[self.left_hand_index + self.qpos_offset - 1]
             obs["left_hand_dq"] = self.mj_data.qvel[self.left_hand_index + self.qvel_offset - 1]
@@ -388,8 +796,9 @@ class DefaultEnv:
 
     def sim_step(self):
         self.obs = self.prepare_obs()
-        self.unitree_bridge.PublishLowState(self.obs)
-        if self.unitree_bridge.joystick:
+        if self.unitree_bridge is not None:
+            self.unitree_bridge.PublishLowState(self.obs)
+        if self.unitree_bridge is not None and self.unitree_bridge.joystick:
             self.unitree_bridge.PublishWirelessController()
         if self.elastic_band:
             if self.elastic_band.enable and self.use_floating_root_link:
@@ -412,13 +821,16 @@ class DefaultEnv:
                 self.mj_data.xfrc_applied[self.band_attached_link] = self.elastic_band.Advance(pose)
             else:
                 self.mj_data.xfrc_applied[self.band_attached_link] = np.zeros(6)
-        body_torques = self.compute_body_torques()
-        hand_torques = self.compute_hand_torques()
-        # -1: actuator array is 0-based while joint indices from the model are 1-based
-        self.torques[self.body_joint_index - 1] = body_torques
-        if self.num_hand_dof > 0:
-            self.torques[self.left_hand_index - 1] = hand_torques[: self.num_hand_dof]
-            self.torques[self.right_hand_index - 1] = hand_torques[self.num_hand_dof :]
+        if self.is_adam_onnx:
+            self.torques = self.compute_adam_torques()
+        else:
+            body_torques = self.compute_body_torques()
+            hand_torques = self.compute_hand_torques()
+            # -1: actuator array is 0-based while joint indices from the model are 1-based
+            self.torques[self.body_joint_index - 1] = body_torques
+            if self.num_hand_dof > 0:
+                self.torques[self.left_hand_index - 1] = hand_torques[: self.num_hand_dof]
+                self.torques[self.right_hand_index - 1] = hand_torques[self.num_hand_dof :]
 
         self.torques = np.clip(self.torques, -self.torque_limit, self.torque_limit)
 
@@ -454,7 +866,70 @@ class DefaultEnv:
 
     def update_viewer(self):
         if self.viewer is not None:
+            with self.viewer.lock():
+                self._update_adam_reference_visualization()
             self.viewer.sync()
+
+    def _update_adam_reference_visualization(self):
+        if not self.is_adam_onnx or self.adam_policy_type != "tracking":
+            return
+        scene = self.viewer.user_scn
+        scene.ngeom = 0
+        if not self.adam_reference_visualization_enabled or self.adam_policy is None:
+            return
+
+        positions = self.adam_policy.get_reference_body_positions()
+        if positions is None:
+            return
+        positions = np.asarray(positions, dtype=np.float64)
+        if positions.ndim != 2 or positions.shape[1] != 3:
+            raise ValueError(f"Adam reference markers must have shape (N, 3), got {positions.shape}")
+
+        identity = np.eye(3, dtype=np.float64).reshape(-1)
+        marker_size = np.array(
+            [self.adam_reference_marker_size, 0.0, 0.0], dtype=np.float64
+        )
+        for position in positions:
+            if scene.ngeom >= scene.maxgeom:
+                return
+            mujoco.mjv_initGeom(
+                scene.geoms[scene.ngeom],
+                type=mujoco.mjtGeom.mjGEOM_SPHERE,
+                size=marker_size,
+                pos=position,
+                mat=identity,
+                rgba=self.adam_reference_color,
+            )
+            scene.ngeom += 1
+
+        for start_index, end_index in ADAM_REFERENCE_SKELETON_EDGES:
+            if scene.ngeom >= scene.maxgeom:
+                return
+            if start_index >= len(positions) or end_index >= len(positions):
+                continue
+            geom = scene.geoms[scene.ngeom]
+            mujoco.mjv_initGeom(
+                geom,
+                type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                size=np.zeros(3, dtype=np.float64),
+                pos=np.zeros(3, dtype=np.float64),
+                mat=identity,
+                rgba=self.adam_reference_color,
+            )
+            mujoco.mjv_connector(
+                geom,
+                type=mujoco.mjtGeom.mjGEOM_CAPSULE,
+                width=self.adam_reference_link_radius,
+                from_=positions[start_index],
+                to=positions[end_index],
+            )
+            scene.ngeom += 1
+
+    def _mujoco_key_callback(self, key):
+        if self.elastic_band is not None:
+            self.elastic_band.MujuocoKeyCallback(key)
+        if key == ord("P"):
+            self.handle_keyboard_button("p")
 
     def update_viewer_camera(self):
         if self.viewer is not None:
@@ -502,6 +977,28 @@ class DefaultEnv:
             self.reset()
         if key == "v":
             self.update_viewer_camera()
+        if key == "p" and self.is_adam_onnx and self.adam_policy_type == "tracking":
+            self.adam_reference_visualization_enabled = (
+                not self.adam_reference_visualization_enabled
+            )
+            state = "on" if self.adam_reference_visualization_enabled else "off"
+            print(f"Adam PND reference visualization: {state}")
+            return
+        if self.is_adam_onnx and self.adam_policy is not None:
+            command = np.asarray(self.config.get("ADAM_COMMAND", [0.0, 0.0, 0.0]), dtype=float)
+            if key == "up":
+                command[0] = min(command[0] + 0.1, 0.5)
+            elif key == "down":
+                command[0] = max(command[0] - 0.1, -0.5)
+            elif key == "left":
+                command[2] = min(command[2] + 0.1, 0.5)
+            elif key == "right":
+                command[2] = max(command[2] - 0.1, -0.5)
+            elif key == "space":
+                command[:] = 0.0
+            self.config["ADAM_COMMAND"] = command.tolist()
+            self.adam_policy.set_command(command)
+            return
         if key in ["up", "down", "left", "right"]:
             self.apply_perturbation(key)
 
@@ -525,6 +1022,22 @@ class DefaultEnv:
 
     def reset(self):
         mujoco.mj_resetData(self.mj_model, self.mj_data)
+        if self.is_adam_onnx:
+            root_pos = np.asarray(self.config.get("ADAM_DEFAULT_ROOT_POS", [0.0, 0.0, 0.9]))
+            root_quat = np.asarray(
+                self.config.get("ADAM_DEFAULT_ROOT_QUAT_WXYZ", [1.0, 0.0, 0.0, 0.0])
+            )
+            self.mj_data.qpos[:3] = root_pos
+            self.mj_data.qpos[3:7] = root_quat
+            self.mj_data.qpos[self.adam_actuator_qpos_ids] = self.adam_default_actuator_q
+            self.mj_data.qvel[:] = 0.0
+            self.mj_data.ctrl[:] = 0.0
+            self.adam_target_q = self.adam_default_actuator_q.copy()
+            self.adam_policy_counter = 0
+            self.adam_tracking_reference_active = False
+            if self.adam_policy is not None:
+                self.adam_policy.reset()
+            mujoco.mj_forward(self.mj_model, self.mj_data)
 
 
 class BaseSimulator:
@@ -559,13 +1072,20 @@ class BaseSimulator:
                 f"Only 'default' is supported in this minimal build."
             )
 
-        try:
-            if self.config.get("INTERFACE", None):
-                ChannelFactoryInitialize(self.config["DOMAIN_ID"], self.config["INTERFACE"])
-            else:
-                ChannelFactoryInitialize(self.config["DOMAIN_ID"])
-        except Exception as e:
-            print(f"Note: Channel factory initialization attempt: {e}")
+        self.is_adam_onnx = (
+            self.config.get("ROBOT_TYPE") == "adam_pro"
+            and self.config.get("ADAM_CONTROL_MODE") == "onnx"
+        )
+        self.adam_policy_type = self.config.get("ADAM_POLICY_TYPE", "locomotion")
+
+        if not (self.is_adam_onnx and self.adam_policy_type == "locomotion"):
+            try:
+                if self.config.get("INTERFACE", None):
+                    ChannelFactoryInitialize(self.config["DOMAIN_ID"], self.config["INTERFACE"])
+                else:
+                    ChannelFactoryInitialize(self.config["DOMAIN_ID"])
+            except Exception as e:
+                print(f"Note: Channel factory initialization attempt: {e}")
 
         self.init_unitree_bridge()
         self.sim_env.set_unitree_bridge(self.unitree_bridge)
@@ -589,6 +1109,12 @@ class BaseSimulator:
         pass
 
     def init_unitree_bridge(self):
+        if self.is_adam_onnx and self.adam_policy_type == "locomotion":
+            self.unitree_bridge = None
+            return
+        if self.is_adam_onnx and self.adam_policy_type == "tracking":
+            self.unitree_bridge = AdamG1DecoderBridge(self.config)
+            return
         self.unitree_bridge = UnitreeSdk2Bridge(self.config)
         if self.config["USE_JOYSTICK"]:
             self.unitree_bridge.SetupJoystick(
@@ -644,6 +1170,11 @@ class BaseSimulator:
 
     def close(self):
         self._running = False
+        try:
+            if self.unitree_bridge is not None and hasattr(self.unitree_bridge, "close"):
+                self.unitree_bridge.close()
+        except Exception as e:
+            print(f"Warning while closing simulator bridge: {e}")
         try:
             if self.sim_env.image_publish_process is not None:
                 self.sim_env.image_publish_process.stop()

@@ -1,0 +1,360 @@
+ROBOT_TYPE: 'adam_pro'
+ROBOT_SCENE: "gear_sonic/data/robot_model/model_data/adam_pro/scene_43dof.xml"
+
+DOMAIN_ID: 0
+INTERFACE: "lo"
+SIMULATOR: "mujoco"
+
+USE_JOYSTICK: 0
+JOYSTICK_TYPE: "xbox"
+JOYSTICK_DEVICE: 0
+
+FREE_BASE: False
+PRINT_SCENE_INFORMATION: True
+ENABLE_ELASTIC_BAND: False
+
+SIMULATE_DT: 0.005
+VIEWER_DT: 0.02
+REWARD_DT: 0.02
+USE_SENSOR: False
+USE_HISTORY: True
+USE_HISTORY_LOCO: True
+USE_HISTORY_MIMIC: True
+GAIT_PERIOD: 0.8
+
+ADAM_CONTROL_MODE: "onnx"
+# tracking: consume SONIC's source-motion output, retarget G1 refs to Adam refs, then run tracking ONNX.
+# locomotion: run the standalone Adam locomotion ONNX without DDS decoder input.
+ADAM_POLICY_TYPE: "tracking"
+ADAM_POLICY_ONNX_PATH: "/home/r/Downloads/HumanoidVLA_MJ/example/python/adam_result/exported/model_45000.onnx"
+ADAM_TRACKING_ONNX_PATH: "/home/r/Downloads/HumanoidVLA_MJ/example/python/adam_result/exported/model_126000.onnx"
+ADAM_POLICY_DT: 0.02
+ADAM_POLICY_CYCLE_TIME: 0.8
+ADAM_DEFAULT_ROOT_POS: [0.0, 0.0, 0.83]
+ADAM_DEFAULT_ROOT_QUAT_WXYZ: [1.0, 0.0, 0.0, 0.0]
+ADAM_COMMAND: [0.0, 0.0, 0.0]
+ADAM_CLIP_OBSERVATIONS: 100.0
+ADAM_CLIP_ACTIONS: 100.0
+
+ADAM_RETARGETING_ROOT: "/home/r/Downloads/robot_to_robot_retargeting"
+ADAM_RETARGET_MAX_ITER: 5
+ADAM_RETARGET_EVERY_N: 2
+ADAM_RETARGET_INPUT_EPSILON: 0.0
+ADAM_RETARGET_SOLVER: "daqp"
+ADAM_RETARGET_DAMPING: 0.5
+ADAM_RETARGET_VERBOSE: False
+ADAM_G1_NUM_MOTORS: 29
+ADAM_G1_REFERENCE_SOURCE: "zmq"
+ADAM_G1_REFERENCE_ZMQ_HOST: "localhost"
+ADAM_G1_REFERENCE_ZMQ_PORT: 5557
+ADAM_G1_REFERENCE_ZMQ_TOPIC: "g1_debug"
+ADAM_G1_REFERENCE_TIMEOUT: 0.5
+ADAM_G1_DEFAULT_ROOT_POS: [0.0, 0.0, 0.793]
+ADAM_G1_DEFAULT_ROOT_QUAT_WXYZ: [1.0, 0.0, 0.0, 0.0]
+ADAM_G1_DEFAULT_DOF_POS: [
+  -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
+  -0.1, 0.0, 0.0, 0.3, -0.2, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0
+]
+
+ADAM_TRACKING_FK_XML_PATH: "/home/r/Downloads/HumanoidVLA_MJ/example/python/humanoidverse/data/robots/adam_sp/adam_lite_Optim.xml"
+ADAM_TRACKING_HISTORY_LEN: 10
+ADAM_TRACKING_FUTURE_STEPS: 10
+ADAM_REFERENCE_VISUALIZATION: True
+ADAM_REFERENCE_MARKER_SIZE: 0.025
+ADAM_REFERENCE_LINK_RADIUS: 0.008
+ADAM_REFERENCE_COLOR: [0.1, 1.0, 0.25, 0.85]
+ADAM_TRACKING_BODY_NAMES: [
+  "pelvis", "hipPitchLeft", "hipRollLeft", "thighLeft", "shinLeft", "anklePitchLeft", "toeLeft",
+  "hipPitchRight", "hipRollRight", "thighRight", "shinRight", "anklePitchRight", "toeRight",
+  "waistRoll_link", "waistPitch_link", "torso",
+  "shoulderPitchLeft", "shoulderRollLeft", "shoulderYawLeft", "elbowLeft",
+  "shoulderPitchRight", "shoulderRollRight", "shoulderYawRight", "elbowRight"
+]
+ADAM_TRACKING_FK_BODY_NAMES: [
+  "pelvis", "hipPitchLeft", "hipRollLeft", "thighLeft", "shinLeft", "anklePitchLeft", "toeLeft",
+  "hipPitchRight", "hipRollRight", "thighRight", "shinRight", "anklePitchRight", "toeRight",
+  "waistRoll", "waistPitch", "torso",
+  "shoulderPitchLeft", "shoulderRollLeft", "shoulderYawLeft", "elbowLeft",
+  "shoulderPitchRight", "shoulderRollRight", "shoulderYawRight", "elbowRight"
+]
+ADAM_TRACKING_EXTEND_CONFIG:
+  - joint_name: left_hand
+    parent_name: elbowLeft
+    pos: [-0.025, 0.0285, -0.2746]
+    rot: [1.0, 0.0, 0.0, 0.0]
+  - joint_name: right_hand
+    parent_name: elbowRight
+    pos: [-0.025, -0.0285, -0.2746]
+    rot: [1.0, 0.0, 0.0, 0.0]
+  - joint_name: head_link
+    parent_name: torso
+    pos: [0.0, 0.0, 0.5]
+    rot: [1.0, 0.0, 0.0, 0.0]
+  - joint_name: left_toeend
+    parent_name: toeLeft
+    pos: [0.16945, 0.0, -0.063606]
+    rot: [1.0, 0.0, 0.0, 0.0]
+  - joint_name: right_toeend
+    parent_name: toeRight
+    pos: [0.16945, 0.0, -0.063606]
+    rot: [1.0, 0.0, 0.0, 0.0]
+
+ADAM_TRACKING_POLICY_DEFAULT_DOF_POS: [
+  -0.586, -0.085, -0.322, 1.288, -0.789, 0.002,
+  -0.586, 0.085, 0.322, 1.288, -0.789, -0.002,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, -0.3,
+  0.0, 0.0, 0.0, -0.3
+]
+ADAM_TRACKING_POLICY_KP: [
+  305.0, 255.0, 255.0, 305.0, 50.0, 30.0,
+  305.0, 255.0, 255.0, 305.0, 50.0, 30.0,
+  255.0, 305.0, 255.0,
+  40.0, 40.0, 40.0, 40.0,
+  40.0, 40.0, 40.0, 40.0
+]
+ADAM_TRACKING_POLICY_EFFORT_LIMIT: [
+  230.0, 160.0, 105.0, 230.0, 50.0, 30.0,
+  230.0, 160.0, 105.0, 230.0, 50.0, 30.0,
+  110.0, 110.0, 110.0,
+  65.0, 65.0, 30.0, 30.0,
+  65.0, 65.0, 30.0, 30.0
+]
+ADAM_TRACKING_DEFAULT_MOTOR_ANGLES: [
+  -0.586, -0.085, -0.322, 1.288, -0.789, 0.002,
+  -0.586, 0.085, 0.322, 1.288, -0.789, -0.002,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, -0.3,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, -0.3,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0
+]
+
+TORSO_BODY: "torso"
+ROOT_BODY: "pelvis"
+FLOATING_BASE_JOINT: "floating_base"
+
+ADAM_POLICY_JOINT_NAMES: [
+  "hipPitch_Left", "hipRoll_Left", "hipYaw_Left", "kneePitch_Left", "anklePitch_Left", "ankleRoll_Left",
+  "hipPitch_Right", "hipRoll_Right", "hipYaw_Right", "kneePitch_Right", "anklePitch_Right", "ankleRoll_Right",
+  "waistRoll", "waistPitch", "waistYaw",
+  "shoulderPitch_Left", "shoulderRoll_Left", "shoulderYaw_Left", "elbow_Left",
+  "shoulderPitch_Right", "shoulderRoll_Right", "shoulderYaw_Right", "elbow_Right"
+]
+
+ADAM_POLICY_DEFAULT_DOF_POS: [
+  -0.32, 0.0, -0.18, 0.66, -0.39, -0.0,
+  -0.32, -0.0, 0.18, 0.66, -0.39, -0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.1, 0.0, -0.3,
+  0.0, -0.1, 0.0, -0.3
+]
+
+ADAM_POLICY_KP: [
+  305.0, 255.0, 255.0, 305.0, 50.0, 30.0,
+  305.0, 255.0, 255.0, 305.0, 50.0, 30.0,
+  255.0, 305.0, 255.0,
+  100.0, 100.0, 100.0, 100.0,
+  100.0, 100.0, 100.0, 100.0
+]
+
+ADAM_POLICY_KD: [
+  5.0, 3.5, 3.5, 5.0, 0.8, 0.35,
+  5.0, 3.5, 3.5, 5.0, 0.8, 0.35,
+  3.5, 5.0, 3.5,
+  2.0, 2.0, 2.0, 2.0,
+  2.0, 2.0, 2.0, 2.0
+]
+
+ADAM_POLICY_EFFORT_LIMIT: [
+  230.0, 160.0, 105.0, 230.0, 40.0, 12.0,
+  230.0, 160.0, 105.0, 230.0, 40.0, 12.0,
+  110.0, 110.0, 110.0,
+  65.0, 65.0, 65.0, 30.0,
+  65.0, 65.0, 65.0, 30.0
+]
+
+ADAM_ACTUATOR_NAMES: [
+  "hipPitch_Left", "hipRoll_Left", "hipYaw_Left", "kneePitch_Left", "anklePitch_Left", "ankleRoll_Left",
+  "hipPitch_Right", "hipRoll_Right", "hipYaw_Right", "kneePitch_Right", "anklePitch_Right", "ankleRoll_Right",
+  "waistRoll", "waistPitch", "waistYaw",
+  "shoulderPitch_Left", "shoulderRoll_Left", "shoulderYaw_Left", "elbow_Left",
+  "wristYaw_Left", "wristPitch_Left", "wristRoll_Left",
+  "L_thumb_MCP_joint1", "L_thumb_MCP_joint2", "L_index_MCP_joint", "L_middle_MCP_joint", "L_ring_MCP_joint", "L_pinky_MCP_joint",
+  "shoulderPitch_Right", "shoulderRoll_Right", "shoulderYaw_Right", "elbow_Right",
+  "wristYaw_Right", "wristPitch_Right", "wristRoll_Right",
+  "R_thumb_MCP_joint1", "R_thumb_MCP_joint2", "R_index_MCP_joint", "R_middle_MCP_joint", "R_ring_MCP_joint", "R_pinky_MCP_joint",
+  "neckYaw", "neckPitch"
+]
+
+MOTOR2JOINT: [
+  0, 1, 2, 3, 4, 5,
+  6, 7, 8, 9, 10, 11,
+  12, 13, 14,
+  15, 16, 17, 18, 19, 20, 21,
+  22, 23, 24, 25, 26, 27,
+  28, 29, 30, 31, 32, 33, 34,
+  35, 36, 37, 38, 39, 40,
+  41, 42
+]
+JOINT2MOTOR: [
+  0, 1, 2, 3, 4, 5,
+  6, 7, 8, 9, 10, 11,
+  12, 13, 14,
+  15, 16, 17, 18, 19, 20, 21,
+  22, 23, 24, 25, 26, 27,
+  28, 29, 30, 31, 32, 33, 34,
+  35, 36, 37, 38, 39, 40,
+  41, 42
+]
+
+UNITREE_LEGGED_CONST:
+  HIGHLEVEL: 0xEE
+  LOWLEVEL: 0xFF
+  TRIGERLEVEL: 0xF0
+  PosStopF: 2146000000.0
+  VelStopF: 16000.0
+  MODE_MACHINE: 5
+  MODE_PR: 0
+
+MOTOR_KP: [
+  305.0, 255.0, 255.0, 305.0, 50.0, 30.0,
+  305.0, 255.0, 255.0, 305.0, 50.0, 30.0,
+  255.0, 305.0, 255.0,
+  100.0, 100.0, 100.0, 100.0,
+  10.0, 10.0, 10.0,
+  1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+  100.0, 100.0, 100.0, 100.0,
+  10.0, 10.0, 10.0,
+  1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+  10.0, 10.0
+]
+
+MOTOR_KD: [
+  5.0, 3.5, 3.5, 5.0, 0.8, 0.35,
+  5.0, 3.5, 3.5, 5.0, 0.8, 0.35,
+  3.5, 5.0, 3.5,
+  2.0, 2.0, 2.0, 2.0,
+  0.2, 0.2, 0.2,
+  0.05, 0.05, 0.05, 0.05, 0.05, 0.05,
+  2.0, 2.0, 2.0, 2.0,
+  0.2, 0.2, 0.2,
+  0.05, 0.05, 0.05, 0.05, 0.05, 0.05,
+  0.2, 0.2
+]
+
+WeakMotorJointIndex:
+  hipPitch_Left: 0
+  hipRoll_Left: 1
+  hipYaw_Left: 2
+  kneePitch_Left: 3
+  anklePitch_Left: 4
+  ankleRoll_Left: 5
+  hipPitch_Right: 6
+  hipRoll_Right: 7
+  hipYaw_Right: 8
+  kneePitch_Right: 9
+  anklePitch_Right: 10
+  ankleRoll_Right: 11
+  waistRoll: 12
+  waistPitch: 13
+  waistYaw: 14
+
+NUM_MOTORS: 43
+NUM_JOINTS: 43
+NUM_HAND_MOTORS: 0
+NUM_HAND_JOINTS: 0
+NUM_UPPER_BODY_JOINTS: 18
+
+DEFAULT_DOF_ANGLES: [
+  -0.32, 0.0, -0.18, 0.66, -0.39, 0.0,
+  -0.32, 0.0, 0.18, 0.66, -0.39, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.1, 0.0, -0.3,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, -0.1, 0.0, -0.3,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0
+]
+
+DEFAULT_MOTOR_ANGLES: [
+  -0.32, 0.0, -0.18, 0.66, -0.39, 0.0,
+  -0.32, 0.0, 0.18, 0.66, -0.39, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.1, 0.0, -0.3,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, -0.1, 0.0, -0.3,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0
+]
+
+motor_effort_limit_list: [
+  230.0, 160.0, 105.0, 230.0, 40.0, 12.0,
+  230.0, 160.0, 105.0, 230.0, 40.0, 12.0,
+  110.0, 110.0, 110.0,
+  65.0, 65.0, 65.0, 30.0,
+  6.4, 6.4, 6.4,
+  1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+  65.0, 65.0, 65.0, 30.0,
+  6.4, 6.4, 6.4,
+  1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+  6.4, 6.4
+]
+
+motor_pos_lower_limit_list: [
+  -2.164, -0.733, -0.785, 0.052, -1.0, -0.3491,
+  -2.164, -1.605, -0.785, 0.052, -1.0, -0.3491,
+  -0.279, -0.663, -0.829,
+  -3.613, -0.628, -2.583, -2.496,
+  -2.67, -0.96, -0.96,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  -3.613, -2.793, -2.583, -2.496,
+  -2.67, -0.96, -0.96,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  -1.571, -0.873
+]
+
+motor_pos_upper_limit_list: [
+  2.164, 1.605, 0.785, 2.391, 0.35, 0.3491,
+  2.164, 0.733, 0.785, 2.391, 0.35, 0.3491,
+  0.279, 1.361, 0.829,
+  2.042, 2.793, 2.583, 0.209,
+  2.67, 0.96, 0.96,
+  1.1, 0.5, 1.7, 1.7, 1.7, 1.7,
+  2.042, 0.628, 2.583, 0.209,
+  2.67, 0.96, 0.96,
+  1.1, 0.5, 1.7, 1.7, 1.7, 1.7,
+  1.571, 0.873
+]
+
+motor_vel_limit_list: [
+  15.0, 8.0, 8.0, 15.0, 20.0, 20.0,
+  15.0, 8.0, 8.0, 15.0, 20.0, 20.0,
+  8.0, 8.0, 8.0,
+  8.0, 8.0, 8.0, 8.0,
+  8.0, 8.0, 8.0,
+  8.0, 8.0, 8.0, 8.0, 8.0, 8.0,
+  8.0, 8.0, 8.0, 8.0,
+  8.0, 8.0, 8.0,
+  8.0, 8.0, 8.0, 8.0, 8.0, 8.0,
+  8.0, 8.0
+]
+
+history_config:
+  base_ang_vel: 4
+  projected_gravity: 4
+  dof_pos: 4
+  dof_vel: 4
+  actions: 4

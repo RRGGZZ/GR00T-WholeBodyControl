@@ -1,10 +1,11 @@
-"""Entry point for running a MuJoCo simulation loop with the G1 robot model.
+"""Entry point for running a MuJoCo simulation loop.
 
-Parses a YAML-based WBC config via tyro CLI, instantiates the G1 robot model,
+Parses a YAML-based WBC config via tyro CLI, instantiates the G1 robot model
+when needed,
 and launches the simulator (optionally with offscreen image publishing).
 """
 
-from typing import Dict
+from typing import Any, Dict, Optional
 
 import tyro
 
@@ -19,7 +20,13 @@ ArgsConfig = SimLoopConfig
 
 
 class SimWrapper:
-    def __init__(self, robot_model: RobotModel, env_name: str, config: Dict[str, any], **kwargs):
+    def __init__(
+        self,
+        robot_model: Optional[RobotModel],
+        env_name: str,
+        config: Dict[str, Any],
+        **kwargs,
+    ):
         self.robot_model = robot_model
         self.config = config
 
@@ -43,7 +50,9 @@ def main(config: ArgsConfig):
             config.enable_offscreen
         ), "enable_offscreen must be True when enable_image_publish is True"
 
-    robot_model = instantiate_g1_robot_model()
+    robot_model = None
+    if config.robot_type in ["g1", "g1_29dof"]:
+        robot_model = instantiate_g1_robot_model()
 
     sim_wrapper = SimWrapper(
         robot_model=robot_model,
